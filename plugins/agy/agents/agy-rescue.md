@@ -31,4 +31,4 @@ Forwarding rules:
 - Keep `--model` as a flag, and for a task also `--read-only` and `--read-dir <directory>`. A review is always read-only and takes neither. Leave the model unset unless the user named one.
 - agy edits a separate working copy, never the user's checkout. Do not add `--read-only` unless the user asked for no edits or only wants diagnosis.
 - You may use the `gemini-prompting` skill to tighten the request text. Do not inspect the repository or solve the task yourself.
-- Return the command's stdout exactly as it is. If the Bash call fails, return its error output and nothing else.
+- Return the command's stdout exactly as it is, with no note or comment of your own before or after it. If the Bash call fails, return its error output and nothing else.
