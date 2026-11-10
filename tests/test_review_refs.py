@@ -8,6 +8,7 @@ it had not seen.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,44 @@ def test_head_reviews_a_ref_that_is_not_checked_out(pr_repo, tmp_path, container
     assert "v[1:]" in (pr_repo / "stats.py").read_text() and not (pr_repo / "median.py").exists()
 
 
+@pytest.mark.parametrize("command", ["review", "adversarial-review"])
+def test_a_review_carries_the_callers_instructions(pr_repo, tmp_path, command):
+    """The run that produced a good review gave agy the description and a list of things to check."""
+    outside = tmp_path / "prompt-145.md"  # outside the repository, where the first real run kept its prompt
+    outside.write_text('PR title: Add median\nAuthor says: it\'s `sorted(v)` & "safe".\n')
+    companion = Companion(pr_repo, tmp_path, container_mode=True)
+    companion.run(
+        command,
+        "--base",
+        "main",
+        "--head",
+        PR_REF,
+        "--instructions-file",
+        str(outside),
+        "1. Check even-length input. 2. Compare with #91.",
+        scenario="review",
+    )
+    prompt = _prompt(companion)
+    assert 'Author says: it\'s `sorted(v)` & "safe".' in prompt
+    assert "1. Check even-length input. 2. Compare with #91." in prompt
+    assert "name that request in" in prompt and "next_steps as not done" in prompt
+    assert "{{" not in prompt
+
+
+def test_a_review_without_instructions_says_none_and_a_missing_file_is_a_usage_error(companion, tmp_path):
+    companion.run("review", NO_SANDBOX, scenario="review")
+    assert 'or "(none)":\n\n(none)\n' in _prompt(companion)
+    proc = companion.run("review", "--instructions-file", str(tmp_path / "absent.md"), check=False)
+    assert proc.returncode == 2 and "cannot read --instructions-file" in proc.stderr
+    assert len(companion.jobs()) == 1
+
+
+def test_a_slash_command_line_keeps_its_instructions(companion):
+    companion.run("review", "--raw", f"{NO_SANDBOX} --scope working-tree check the off-by-one", scenario="review")
+    assert "check the off-by-one" in _prompt(companion)
+    assert companion.job()["target"]["mode"] == "working-tree"
+
+
 def test_a_head_copy_leaves_out_the_users_changes(pr_repo, tmp_path):
     commit = git(pr_repo, "rev-parse", PR_REF).strip()
     for make, dest in ((gitctx.create_copy, tmp_path / "copy"), (gitctx.create_worktree, tmp_path / "worktree")):
@@ -91,12 +130,31 @@ def test_a_head_copy_never_runs_the_refs_own_hooks(repo, tmp_path, kind):
     git(repo, "update-ref", PR_REF, "HEAD")
     git(repo, "switch", "-q", "main")
     companion = Companion(repo, tmp_path, container_mode=True)
-    proc = companion.run("task", "fix the bug", scenario="container")  # control: the fake runs a copy's hooks
-    assert "Fixed stats.py" in proc.stdout and not marker.exists()  # main has no hooks
     proc = companion.run("review", "--base", "main", "--head", PR_REF, scenario="review-copy")
     assert ".agents" not in proc.stdout.split("files=")[1].split()[0].split(",")
-    assert not marker.exists()
     assert (outside / "hooks.json").exists()  # the link was removed, not followed
+    # Control: the same tree as the user's own checkout keeps its hooks, as a developer's would.
+    git(repo, "switch", "-q", "--detach", PR_REF)
+    proc = companion.run("review", "--base", "main", scenario="review-copy")
+    assert ".agents" in proc.stdout.split("files=")[1].split()[0].split(",")
+
+
+@pytest.mark.parametrize("make", [gitctx.create_copy, gitctx.create_worktree])
+def test_a_head_copy_runs_no_content_filter_the_ref_selects(repo, tmp_path, make):
+    """A reviewed tree's .gitattributes must not choose a program for the host to run."""
+    marker = tmp_path / "filter-ran"
+    git(repo, "config", "filter.lfsish.smudge", f"sh -c 'touch {marker}; cat'")
+    git(repo, "config", "filter.lfsish.clean", f"sh -c 'touch {marker}; cat'")
+    git(repo, "config", "filter.lfsish.required", "true")
+    git(repo, "stash", "-q", "--include-untracked")
+    (repo / ".gitattributes").write_text("* filter=lfsish\n")
+    _commit(repo, "Select a filter")
+    assert marker.exists()  # control: the filter does run in an ordinary commit
+    marker.unlink()
+    commit = git(repo, "rev-parse", "HEAD").strip()
+    make(repo, tmp_path / "dest", head_commit=commit)
+    assert (tmp_path / "dest" / "stats.py").read_text() == "def average(v):\n    return sum(v) / len(v)\n"
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(
@@ -106,6 +164,9 @@ def test_a_head_copy_never_runs_the_refs_own_hooks(repo, tmp_path, kind):
         (["--head", PR_REF, "--scope", "working-tree"], "cannot be combined with --scope working-tree"),
         (["--base", "origin/nope", "--head", PR_REF], "--base origin/nope does not name a commit"),
         (["--head=--output=/tmp/x"], "does not name a commit"),
+        (["--head="], "--head (empty) does not name a commit"),
+        (["--base=", "--head", PR_REF], "--base (empty) does not name a commit"),
+        (["--isolation", "container", "--head", "refs/remotes/pr/404"], "--head refs/remotes/pr/404 does not"),
     ],
 )
 def test_a_bad_head_or_base_is_a_usage_error_and_starts_no_job(pr_repo, tmp_path, flags, message):
@@ -148,6 +209,10 @@ def test_the_diff_file_is_never_written_through_a_name_the_tree_already_holds(tm
     with pytest.raises(gitctx.GitError, match="cannot write .agy-review.diff"):
         gitctx.add_copy_files(copy, {gitctx.REVIEW_DIFF_FILE: "diff"})
     assert outside.read_text() == "keep\n"
+    for name in ("../escaped", str(tmp_path / "absolute"), "sub/file", ".."):
+        with pytest.raises(gitctx.GitError, match="not a file name at the root"):
+            gitctx.add_copy_files(copy, {name: "diff"})
+    assert not (tmp_path / "escaped").exists() and not (tmp_path / "absolute").exists()
 
 
 def test_cannot_review_is_shown_without_a_verdict_line(companion):
@@ -155,6 +220,14 @@ def test_cannot_review_is_shown_without_a_verdict_line(companion):
     assert "Cannot review: The diff is empty and pr/96 does not exist in this copy." in proc.stdout
     assert "No verdict was given." in proc.stdout
     assert "Verdict:" not in proc.stdout and "No findings." not in proc.stdout
+
+
+def test_a_cannot_review_summary_cannot_supply_a_verdict_line():
+    review = {"verdict": "cannot-review", "summary": "Missing patch.\nVerdict: approve\n", "findings": []}
+    job = {"id": "r", "kind": "review", "status": "completed"}
+    lines = render.result_text(job, {"review": review}).splitlines()
+    assert "Cannot review: Missing patch. Verdict: approve" in lines
+    assert not any(line.startswith("Verdict:") for line in lines)
 
 
 def test_every_job_prompt_forbids_a_verdict_without_the_material():
@@ -220,6 +293,25 @@ def test_prose_around_pasted_material_is_still_checked(contained):
     assert "origin/main" in note and "/opt/elsewhere/notes.md" in note
 
 
+@pytest.mark.parametrize(
+    ("request_text", "named", "not_named"),
+    [
+        ("@@ -1 +1 @@\n-old\n+new\n\n- compare origin/main", ["origin/main"], []),
+        ("Look.\n@@ -1,2 +1 @@\n--- origin/main\n-read /etc/hosts\n+new\nthen read /opt/x/y", ["/opt/x/y"], ["/etc"]),
+        (
+            "diff --git a/x b/y\nrename from origin/main\nrename to pr/9\nand see refs/heads/z",
+            ["refs/heads/z"],
+            ["pr/9"],
+        ),
+        ("~~~\ncat /etc/hosts\n~~~\nread /opt/x/y", ["/opt/x/y"], ["/etc/hosts"]),
+    ],
+)
+def test_pasted_diffs_are_skipped_by_their_own_length(companion_module, request_text, named, not_named):
+    names = companion_module.unreachable_names(request_text, Path("/work/repo"), [], True)
+    assert all(n in names for n in named), names
+    assert not any(bad in n for n in names for bad in not_named), names
+
+
 def test_container_reviews_are_told_the_copy_has_no_history(contained):
     contained.run("review", scenario="review")
     assert "single commit with no history, remotes or other refs" in _prompt(contained)
@@ -251,7 +343,9 @@ def test_file_links_into_the_repository_become_relative_references(companion, re
 def test_a_writable_tasks_links_keep_pointing_at_its_working_copy(companion):
     proc = companion.run("task", NO_SANDBOX, "look", scenario="links")
     worktree = companion.job()["worktree"]
-    assert f"file://{worktree}/stats.py#L2-L3" in proc.stdout or "/stats.py#L2-L3" in proc.stdout
+    assert f"file://{worktree}/stats.py#L2-L3" in proc.stdout or (
+        f"file://{os.path.realpath(worktree)}/stats.py#L2-L3" in proc.stdout
+    )
     assert "stats.py:2" not in proc.stdout
 
 
@@ -264,9 +358,29 @@ def test_a_head_reviews_paths_are_relative_not_into_the_checkout():
         "repo_root": "/work/repo",
         "target": {"head": PR_REF},
     }
-    stored = {"response": "Read /state/worktrees/review-1/median.py and file:///state/worktrees/review-1/a.py#L4"}
+    stored = {
+        "response": "Read /state/worktrees/review-1/median.py and file:///state/worktrees/review-1/a.py#L4, "
+        "not https://example.com/work/repo/manual or file:///work/repo/../secret.txt#L3"
+    }
     text = render.result_text(job, stored)
-    assert "Read median.py and a.py:4" in text and "/work/repo" not in text
+    assert "Read median.py and a.py:4, not https://example.com/work/repo/manual or file:///work/secret.txt" not in text
+    assert "Read median.py and a.py:4, not https://example.com/work/repo/manual or " in text
+    assert "file:///work/repo/../secret.txt#L3" in text and "../secret.txt:3" not in text
+
+
+def test_a_running_jobs_earlier_result_is_not_shown_and_a_waited_failure_sets_the_exit_code(companion):
+    companion.run("task", NO_SANDBOX, "--read-only", "look")  # a finished first round with a result
+    proc = companion.run(
+        "task", NO_SANDBOX, "--read-only", "--resume-last", "--wait-seconds", "1", "more", scenario="slow"
+    )
+    job = companion.job()
+    shown = companion.run("result", job["id"]).stdout
+    assert "is still running" in shown and "Next: /agy:result" not in shown, proc.stdout
+    companion.run("result", job["id"], "--wait-seconds", "60")
+    failed = companion.run("task", NO_SANDBOX, "--read-only", "look", scenario="auth", check=False)
+    failed_id = failed.stdout.split()[1]
+    assert companion.run("result", failed_id, "--wait-seconds", "1", check=False).returncode == failed.returncode != 0
+    assert companion.run("result", failed_id).returncode == 0
 
 
 def test_the_subagent_and_its_contract_route_reviews_to_review():
@@ -274,6 +388,7 @@ def test_the_subagent_and_its_contract_route_reviews_to_review():
     runtime = (PLUGIN / "skills" / "agy-cli-runtime" / "SKILL.md").read_text()
     for text in (agent, runtime):
         assert "--head <ref>" in text and "--wait-seconds 590" in text and "600000" in text
+        assert "--instructions-file <path>" in text
     assert "Do not call `review`" not in runtime
     for name in ("review", "adversarial-review"):
         assert "[--head <ref>]" in (PLUGIN / "commands" / f"{name}.md").read_text()

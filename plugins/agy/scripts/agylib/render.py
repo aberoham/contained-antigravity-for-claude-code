@@ -135,7 +135,8 @@ def next_steps(job: dict[str, Any]) -> str:
 def _review_text(review: dict[str, Any]) -> str:
     if review.get("verdict") == CANNOT_REVIEW:
         # No verdict line at all, so a caller that reads only that line cannot take this for an approval.
-        return f"Cannot review: {str(review.get('summary', '')).strip()}\nNo verdict was given."
+        # ... and on one line, so nothing in agy's summary can stand as a line of its own.
+        return f"Cannot review: {' '.join(str(review.get('summary', '')).split())}\nNo verdict was given."
     lines = [f"Verdict: {review.get('verdict')}", "", str(review.get("summary", "")).strip(), ""]
     findings = sorted(review.get("findings") or [], key=lambda f: SEVERITY_ORDER.get(str(f.get("severity")), 9))
     if not findings:
@@ -171,14 +172,14 @@ def result_text(job: dict[str, Any], stored: dict[str, Any] | None) -> str:
         head = (job.get("target") or {}).get("head")
         if head:
             # The user's checkout holds some other commit, so a path there is not the reviewed file.
-            text = text.replace(root.rstrip("/") + "/", "")
+            text = re.sub(r"(?<![\w.:/-])" + re.escape(root.rstrip("/") + "/"), "", text)
             text += f"\nPaths and lines are as of {head}; read a file with `git show {head}:<path>`."
     return text
 
 
 def _relative_reference(match: re.Match[str], root: str) -> str:
     """A file:// link into the repository as path:line, which Claude Code shows as a working link."""
-    path = unquote(match.group(1))
+    path = os.path.normpath(unquote(match.group(1)))
     prefix = root.rstrip("/") + "/"
     if not path.startswith(prefix):
         return match.group(0)

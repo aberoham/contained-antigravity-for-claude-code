@@ -146,10 +146,10 @@ def working_tree_dirty(cwd: str | Path) -> bool:
 def resolve_commit(cwd: str | Path, ref: str, option: str) -> str:
     """The commit a ref names, or a GitError that names the option the ref came from."""
     commit = ""
-    if not ref.startswith("-"):  # git would read it as an option
+    if ref and not ref.startswith("-"):  # git would read a leading hyphen as an option
         commit = git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False).strip()
     if not commit:
-        raise GitError(f"{option} {ref} does not name a commit in this repository; fetch it first")
+        raise GitError(f"{option} {ref or '(empty)'} does not name a commit in this repository; fetch it first")
     return commit
 
 
@@ -162,9 +162,9 @@ def resolve_target(cwd: str | Path, base: str | None, scope: str, head: str | No
     """
     if scope not in ("auto", "working-tree", "branch"):
         raise GitError(f"unknown --scope {scope}; use auto, working-tree or branch")
-    if base:
+    if base is not None:
         resolve_commit(cwd, base, "--base")
-    if head:
+    if head is not None:
         if scope == "working-tree":
             raise GitError("--head reviews a ref, so it cannot be combined with --scope working-tree")
         ref = base or default_branch(cwd)
@@ -263,12 +263,33 @@ def add_copy_files(dest: Path, files: dict[str, str]) -> None:
     stops the job instead of being written through.
     """
     for name, text in files.items():
+        if os.path.basename(name) != name or name in ("", ".", ".."):
+            raise GitError(f"{name!r} is not a file name at the root of the working copy")
         try:
             fd = os.open(dest / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         except OSError as exc:
             raise GitError(f"cannot write {name} into the job's working copy: {exc.strerror}") from exc
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+
+
+def _without_filters(root: Path) -> list[str]:
+    """Git options that turn off every content filter the user has configured.
+
+    A tree's .gitattributes chooses which configured filter runs on checkout
+    and on add, on the host and before any isolation. For the user's own
+    HEAD that is what their checkout already did. For another ref it would
+    let someone else's tree pick a program to run and change the files the
+    review reads, so those copies are made with the filters emptied.
+    """
+    names = git(
+        root, "config", "--name-only", "--get-regexp", r"^filter\..*\.(clean|smudge|process|required)$", check=False
+    )
+    options: list[str] = []
+    for driver in sorted({name[len("filter.") : name.rindex(".")] for name in names.split()}):
+        for key, value in (("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")):
+            options += ["-c", f"filter.{driver}.{key}={value}"]
+    return options
 
 
 def create_worktree(
@@ -289,14 +310,15 @@ def create_worktree(
     if not has_head(root):
         raise GitError("the repository has no commits yet")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    git(root, "worktree", "add", "--detach", "--quiet", str(dest), head_commit or "HEAD")
+    plain = _without_filters(root) if head_commit else []
+    git(root, *plain, "worktree", "add", "--detach", "--quiet", str(dest), head_commit or "HEAD")
     try:
         if head_commit is None:
             _populate_worktree(root, dest)
         if hook_command is not None:
             install_hooks(dest, hook_command)
-        git(dest, "add", "-A")
-        _commit_baseline(dest)
+        git(dest, *plain, "add", "-A")
+        _commit_baseline(dest, plain)
         return git(dest, "rev-parse", "HEAD").strip()
     except Exception:
         remove_worktree(root, dest)
@@ -324,14 +346,15 @@ def create_copy(cwd: str | Path, dest: Path, head_commit: str | None = None) -> 
         raise GitError("the repository has no commits yet")
     dest.mkdir(parents=True, exist_ok=False)
     try:
-        _checkout_tree(root, dest, head_commit or "HEAD")
+        plain = _without_filters(root) if head_commit else []
+        _checkout_tree(root, dest, head_commit or "HEAD", plain)
         git(dest, "-c", "init.defaultBranch=agy-job", "init", "--quiet")
         if head_commit is None:
             _populate_worktree(root, dest)
         else:
             _remove_agents(dest)
-        git(dest, "add", "-A")
-        _commit_baseline(dest)
+        git(dest, *plain, "add", "-A")
+        _commit_baseline(dest, plain)
         return git(dest, "rev-parse", "HEAD").strip()
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
@@ -347,17 +370,18 @@ def _remove_agents(dest: Path) -> None:
         shutil.rmtree(agents)
 
 
-def _checkout_tree(root: Path, dest: Path, commit: str) -> None:
+def _checkout_tree(root: Path, dest: Path, commit: str, options: list[str]) -> None:
     """Write a commit's tree into dest through a temporary index, so the user's own index is untouched."""
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
         git(root, "read-tree", commit, env=env)
-        git(root, f"--work-tree={dest}", "checkout-index", "--all", "--force", env=env)
+        git(root, *options, f"--work-tree={dest}", "checkout-index", "--all", "--force", env=env)
 
 
-def _commit_baseline(dest: Path) -> None:
+def _commit_baseline(dest: Path, options: list[str]) -> None:
     git(
         dest,
+        *options,  # a commit rehashes files whose timestamps match the index, through the clean filter
         *BASELINE_IDENTITY,
         "commit",
         "--quiet",

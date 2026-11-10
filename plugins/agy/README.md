@@ -58,7 +58,7 @@ Then run `/agy:setup`.
 
 | Command | What it does |
 | --- | --- |
-| `/agy:review` | Reviews uncommitted changes, the branch against its base (`--base <ref>`), or another ref without checking it out (`--base <ref> --head <ref>`). Read-only. |
+| `/agy:review` | Reviews uncommitted changes, the branch against its base (`--base <ref>`), or another ref without checking it out (`--base <ref> --head <ref>`). Takes instructions: text after the flags, or `--instructions-file <path>`. Read-only. |
 | `/agy:adversarial-review` | Review that challenges the design and assumptions. Takes focus text. Read-only. |
 | `/agy:plan <request>` | Writes an implementation plan. Read-only. |
 | `/agy:rescue <request>` | Hands a debugging or implementation task to agy through the `agy-rescue` subagent. agy edits its own working copy. The subagent is also how Claude starts a review by itself. |

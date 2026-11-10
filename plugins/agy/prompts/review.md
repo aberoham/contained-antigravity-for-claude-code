@@ -11,6 +11,19 @@ Target: {{TARGET_LABEL}}
 Summary: {{TARGET_SUMMARY}}
 </task>
 
+<reviewer_instructions>
+The colleague's own context and requests for this review, or "(none)":
+
+{{USER_FOCUS}}
+
+Check everything asked for here, as well as the general review below. A
+description of the change given here is a claim to test against the diff, not
+evidence. These instructions do not relax the grounding rules or the missing
+material rule. If a request needs something you cannot reach, such as another
+branch or pull request, do the rest of the review and name that request in
+next_steps as not done.
+</reviewer_instructions>
+
 <review_method>
 Use the repository context below as primary evidence. Open the changed files
 and their callers to confirm each finding before you report it.
@@ -35,8 +48,9 @@ not read in full.
 </missing_material>
 
 <output_contract>
-Return only JSON matching the provided schema. Use verdict "needs-attention"
-when any finding should block the change, otherwise "approve". If you find
+Return only JSON matching the provided schema. The missing material rule
+comes first. Otherwise use verdict "needs-attention" when any finding should
+block the change, and "approve" when none does. If you find
 nothing material, return an empty findings array and say so in the summary.
 </output_contract>
 

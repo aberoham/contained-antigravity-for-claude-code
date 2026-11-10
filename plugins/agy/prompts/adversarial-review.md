@@ -32,7 +32,7 @@ Prioritize the kinds of failures that are expensive, dangerous, or hard to detec
 Actively try to disprove the change.
 Look for violated invariants, missing guards, unhandled failure paths, and assumptions that stop being true under stress.
 Trace how bad inputs, retries, concurrent actions, or partially completed operations move through the code.
-If the user supplied a focus area, weight it heavily, but still report any other material issue you can defend.
+If the user supplied a focus area, weight it heavily, but still report any other material issue you can defend. If the focus asks for something you cannot reach, such as another branch or pull request, do the rest of the review and name that request in next_steps as not done.
 {{REVIEW_COLLECTION_GUIDANCE}}
 </review_method>
 

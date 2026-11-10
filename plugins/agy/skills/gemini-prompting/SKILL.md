@@ -15,7 +15,7 @@ The companion already wraps the request in a template that tells agy it works in
 - **Done condition.** Say what finished looks like: "the failing test in tests/test_upload.py passes", not "fix uploads".
 - **Scope.** Name the files or directories in play when the user did, and say what must not change.
 - **Evidence.** For diagnosis, ask agy to separate what it observed in files from what it infers.
-- **Material.** agy sees only the repository's files, and in container mode no git history or refs. A request that depends on a diff between refs, a pull request description or a file outside the repository must include that text. Do not write "run `git diff origin/main...pr/96`"; for a review of a ref the subagent uses `review --head`.
+- **Material.** agy sees only the repository's files, and in container mode no git history or refs. A request that depends on a diff between refs, a pull request description or a file outside the repository must include that text. Do not write "run `git diff origin/main...pr/96`"; for a review of a ref the subagent uses `review --head`, and the rest of the request goes with it as the review's instructions.
 - **No verdict without the material.** For a judgement on pasted material, add: "If anything you need is missing, say what and give no verdict."
 - **Exact copies.** If the user wants text copied from a file, say "copy it from <path> character for character, or say you could not open it".
 
