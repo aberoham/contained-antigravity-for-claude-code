@@ -298,6 +298,38 @@ def main() -> int:
         result(conversation, "", structured_output={})
         return 0
 
+    if scenario == "review-copy":
+        # Report what the working copy holds, as a review that opened the files would.
+        diff = cwd / ".agy-review.diff"
+        listing = sorted(p.name for p in cwd.iterdir() if p.name != ".git")
+        summary = f"files={','.join(listing)} diff_bytes={diff.stat().st_size if diff.is_file() else 0}"
+        review = {"verdict": "approve", "summary": summary, "findings": [], "next_steps": []}
+        result(conversation, json.dumps(review), structured_output=review)
+        return 0
+
+    if scenario == "review-cannot":
+        review = {
+            "verdict": "cannot-review",
+            "summary": "The diff is empty and pr/96 does not exist in this copy.",
+            "findings": [],
+            "next_steps": [],
+        }
+        result(conversation, json.dumps(review), structured_output=review)
+        return 0
+
+    if scenario == "links":
+        here = f"file://{cwd}"
+        result(
+            conversation,
+            f"See [stats.py]({here}/stats.py#L2-L3) and {here}/my%20notes.txt (or {here}/stats.py), not file:///etc/hosts.",
+        )
+        return 0
+
+    if scenario == "slow":
+        time.sleep(float(os.environ.get("FAKE_AGY_DELAY", "4")))
+        result(conversation, "Done after a wait.")
+        return 0
+
     if scenario == "review":
         review = {
             "verdict": "needs-attention",

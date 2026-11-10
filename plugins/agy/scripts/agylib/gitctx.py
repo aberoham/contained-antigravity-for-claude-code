@@ -19,6 +19,14 @@ from typing import Any
 
 MAX_UNTRACKED_BYTES = 256 * 1024
 MAX_INLINE_DIFF_BYTES = 400 * 1024
+# A diff over the inline limit is written to this file at the root of
+# the job's working copy, where agy reads it. A container copy has no history
+# to compute the diff from.
+REVIEW_DIFF_FILE = ".agy-review.diff"
+LARGE_DIFF_NOTE = (
+    f"(too large to include; read it from the file {REVIEW_DIFF_FILE} at the root of the working copy. "
+    "That file is not part of the change.)"
+)
 AGENTS_DIR = ".agents"
 HOOKS_PATH = os.path.join(AGENTS_DIR, "hooks.json")
 # Never exported: files that commands run in the working copy leave behind,
@@ -135,9 +143,38 @@ def working_tree_dirty(cwd: str | Path) -> bool:
     return bool(git(cwd, "status", "--porcelain", "--untracked-files=all").strip())
 
 
-def resolve_target(cwd: str | Path, base: str | None, scope: str) -> dict[str, Any]:
+def resolve_commit(cwd: str | Path, ref: str, option: str) -> str:
+    """The commit a ref names, or a GitError that names the option the ref came from."""
+    commit = ""
+    if not ref.startswith("-"):  # git would read it as an option
+        commit = git(cwd, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False).strip()
+    if not commit:
+        raise GitError(f"{option} {ref} does not name a commit in this repository; fetch it first")
+    return commit
+
+
+def resolve_target(cwd: str | Path, base: str | None, scope: str, head: str | None = None) -> dict[str, Any]:
+    """Choose what a review covers.
+
+    With head, the review covers that ref against the base, whatever is
+    checked out: the job's working copy is built from the ref's commit, and
+    the user's uncommitted changes are left out.
+    """
     if scope not in ("auto", "working-tree", "branch"):
         raise GitError(f"unknown --scope {scope}; use auto, working-tree or branch")
+    if base:
+        resolve_commit(cwd, base, "--base")
+    if head:
+        if scope == "working-tree":
+            raise GitError("--head reviews a ref, so it cannot be combined with --scope working-tree")
+        ref = base or default_branch(cwd)
+        return {
+            "mode": "branch",
+            "base": ref,
+            "head": head,
+            "head_commit": resolve_commit(cwd, head, "--head"),
+            "label": f"{head} against {ref}",
+        }
     if base or scope == "branch":
         ref = base or default_branch(cwd)
         return {"mode": "branch", "base": ref, "label": f"branch diff against {ref}"}
@@ -176,8 +213,13 @@ def _untracked_body(cwd: Path, rel: str) -> str:
 
 
 def collect_context(cwd: str | Path, target: dict[str, Any]) -> dict[str, Any]:
-    """Return a summary, the changed files and the context text for the prompt."""
+    """Return a summary, the changed files and the context text for the prompt.
+
+    "copy_files" maps a path in the job's working copy to text the prompt
+    refers to there; add_copy_files writes them once the copy exists.
+    """
     root = repo_root(cwd)
+    copy_files: dict[str, str] = {}
     if target["mode"] == "working-tree":
         status = git(root, "status", "--short", "--untracked-files=all")
         staged = git(root, "diff", "--cached", *PATCH_FORMAT)
@@ -189,18 +231,15 @@ def collect_context(cwd: str | Path, target: dict[str, Any]) -> dict[str, Any]:
         if len(diff.encode()) <= MAX_INLINE_DIFF_BYTES:
             parts += [_section("Staged diff", staged), _section("Unstaged diff", unstaged)]
         else:
-            parts.append(
-                _section(
-                    "Diff",
-                    "(too large to include; read the changed files in the working copy)",
-                )
-            )
+            copy_files[REVIEW_DIFF_FILE] = diff
+            parts.append(_section("Diff", LARGE_DIFF_NOTE))
         parts.append(_section("Untracked files", "\n\n".join(_untracked_body(root, f) for f in untracked)))
         summary = f"{len(files)} changed file(s) in the working tree"
     else:
         base = target["base"]
-        merge_base = git(root, "merge-base", "HEAD", base).strip()
-        rng = f"{merge_base}..HEAD"
+        head = target.get("head_commit") or "HEAD"
+        merge_base = git(root, "merge-base", head, base).strip()
+        rng = f"{merge_base}..{head}"
         files = git(root, "diff", "--name-only", rng).split()
         log = git(root, "log", "--oneline", rng)
         stat = git(root, "diff", "--stat", rng)
@@ -209,13 +248,36 @@ def collect_context(cwd: str | Path, target: dict[str, Any]) -> dict[str, Any]:
         if len(diff.encode()) <= MAX_INLINE_DIFF_BYTES:
             parts.append(_section("Branch diff", diff))
         else:
-            parts.append(_section("Branch diff", "(too large to include; run git diff yourself)"))
-        summary = f"{len(files)} changed file(s) on this branch since {base}"
-    return {"summary": summary, "files": files, "content": "\n".join(parts)}
+            copy_files[REVIEW_DIFF_FILE] = diff
+            parts.append(_section("Branch diff", LARGE_DIFF_NOTE))
+        where = target.get("head") or "this branch"
+        summary = f"{len(files)} changed file(s) on {where} since {base}"
+    return {"summary": summary, "files": files, "content": "\n".join(parts), "copy_files": copy_files}
 
 
-def create_worktree(cwd: str | Path, dest: Path, hook_command: str | None = None) -> str:
+def add_copy_files(dest: Path, files: dict[str, str]) -> None:
+    """Write the plugin's own files at the root of a fresh working copy.
+
+    Each is created exclusively and without following a link, so a tree
+    that already holds the name, as a file or as a link to somewhere else,
+    stops the job instead of being written through.
+    """
+    for name, text in files.items():
+        try:
+            fd = os.open(dest / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            raise GitError(f"cannot write {name} into the job's working copy: {exc.strerror}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+
+def create_worktree(
+    cwd: str | Path, dest: Path, hook_command: str | None = None, head_commit: str | None = None
+) -> str:
     """Make a detached worktree of HEAD plus the user's changes; return the baseline commit.
+
+    With head_commit the worktree holds that commit's tree instead, without
+    the user's changes, which belong to whatever they have checked out.
 
     The plugin's hook is installed before the baseline is committed, so the
     baseline already holds the emptied .agents directory and the hook file.
@@ -227,9 +289,10 @@ def create_worktree(cwd: str | Path, dest: Path, hook_command: str | None = None
     if not has_head(root):
         raise GitError("the repository has no commits yet")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    git(root, "worktree", "add", "--detach", "--quiet", str(dest), "HEAD")
+    git(root, "worktree", "add", "--detach", "--quiet", str(dest), head_commit or "HEAD")
     try:
-        _populate_worktree(root, dest)
+        if head_commit is None:
+            _populate_worktree(root, dest)
         if hook_command is not None:
             install_hooks(dest, hook_command)
         git(dest, "add", "-A")
@@ -240,8 +303,14 @@ def create_worktree(cwd: str | Path, dest: Path, hook_command: str | None = None
         raise
 
 
-def create_copy(cwd: str | Path, dest: Path) -> str:
+def create_copy(cwd: str | Path, dest: Path, head_commit: str | None = None) -> str:
     """Make a self-contained repository holding HEAD's tree plus the user's changes; return the baseline commit.
+
+    With head_commit the copy holds that commit's tree instead, without the
+    user's changes, which belong to whatever they have checked out, and
+    without its .agents directory. Such a ref is often someone else's pull
+    request, and agy would run the hooks it defines on every tool call, in a
+    container that also holds a copy of the user's sign-in.
 
     A container job gets this instead of a linked worktree, because a
     worktree's objects and admin directory live in the user's .git, which is
@@ -255,9 +324,12 @@ def create_copy(cwd: str | Path, dest: Path) -> str:
         raise GitError("the repository has no commits yet")
     dest.mkdir(parents=True, exist_ok=False)
     try:
-        _checkout_head_tree(root, dest)
+        _checkout_tree(root, dest, head_commit or "HEAD")
         git(dest, "-c", "init.defaultBranch=agy-job", "init", "--quiet")
-        _populate_worktree(root, dest)
+        if head_commit is None:
+            _populate_worktree(root, dest)
+        else:
+            _remove_agents(dest)
         git(dest, "add", "-A")
         _commit_baseline(dest)
         return git(dest, "rev-parse", "HEAD").strip()
@@ -266,11 +338,20 @@ def create_copy(cwd: str | Path, dest: Path) -> str:
         raise
 
 
-def _checkout_head_tree(root: Path, dest: Path) -> None:
-    """Write HEAD's tree into dest through a temporary index, so the user's own index is untouched."""
+def _remove_agents(dest: Path) -> None:
+    """Remove a fresh copy's .agents entry, whatever kind of file it is."""
+    agents = dest / AGENTS_DIR
+    if agents.is_symlink() or agents.is_file():
+        agents.unlink()  # a link is removed itself; its target is never followed
+    elif agents.exists():
+        shutil.rmtree(agents)
+
+
+def _checkout_tree(root: Path, dest: Path, commit: str) -> None:
+    """Write a commit's tree into dest through a temporary index, so the user's own index is untouched."""
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
-        git(root, "read-tree", "HEAD", env=env)
+        git(root, "read-tree", commit, env=env)
         git(root, f"--work-tree={dest}", "checkout-index", "--all", "--force", env=env)
 
 

@@ -58,10 +58,10 @@ Then run `/agy:setup`.
 
 | Command | What it does |
 | --- | --- |
-| `/agy:review` | Reviews uncommitted changes, or the branch against its base (`--base <ref>`). Read-only. |
+| `/agy:review` | Reviews uncommitted changes, the branch against its base (`--base <ref>`), or another ref without checking it out (`--base <ref> --head <ref>`). Read-only. |
 | `/agy:adversarial-review` | Review that challenges the design and assumptions. Takes focus text. Read-only. |
 | `/agy:plan <request>` | Writes an implementation plan. Read-only. |
-| `/agy:rescue <request>` | Hands a debugging or implementation task to agy through the `agy-rescue` subagent. agy edits its own working copy. |
+| `/agy:rescue <request>` | Hands a debugging or implementation task to agy through the `agy-rescue` subagent. agy edits its own working copy. The subagent is also how Claude starts a review by itself. |
 | `/agy:status [job]` | Lists jobs, or shows one job with a table of its rounds: duration, time waiting for Claude, tokens, stalls and queued commands. |
 | `/agy:result [job]` | Shows a finished job's output. |
 | `/agy:resume <job> [file]` | Sends the output of commands agy queued back to agy, and lets it continue. |
@@ -117,7 +117,10 @@ it at all.
   compares your files against a snapshot of the baseline taken before agy
   started.
 - Your repository's own `.agents` hooks and workspace plugins run, inside the
-  container, as they would for a developer.
+  container, as they would for a developer. A review with `--head <ref>`
+  is the exception: its copy is built from that ref's tree with the `.agents`
+  directory removed, because the ref is often someone else's pull request and
+  its hooks would run beside the job's copy of your sign-in.
 - agy's own terminal sandbox is off inside the container (Docker blocks the
   user namespaces it needs); the container is the boundary.
 - Jobs run as your user id, and `/agy:setup` refuses an image built for a
@@ -139,7 +142,10 @@ anything the container can read: the repository, any `--read-dir`
 directory, and the job's copy of the sign-in. The repository
 already goes to Google for the review, so that part is not new, but it is
 not nothing. The job's copy is the same credential as your own `agy`
-sign-in; with workforce identity federation it expires with the pool's
+sign-in, and it is not limited to Gemini: on 10 November 2026, with agy 1.5.4
+and a workforce identity federation sign-in, the access token was accepted by
+the Resource Manager, Cloud Storage and IAM APIs, so it can do in Google Cloud
+whatever your own account can. The file also holds the refresh token; with workforce identity federation it expires with the pool's
 session duration (see `NOTES.md`). And a Docker virtual machine on
 macOS shares only some directories: the plugin's state directory must be
 under your home (Colima's default share), which `/agy:setup` checks.
@@ -284,7 +290,18 @@ drives `/agy:setup` and `/agy:review` through `claude --plugin-dir`.
   each approval round costs more input tokens than the last.
 - **`--wait` returns after 100 seconds** with the job still running in the
   background, so the Bash call stays inside Claude Code's default timeout.
-  Follow it with `/agy:status`.
+  The output ends with a `result <job> --wait-seconds 590` command that waits
+  for the result. The `agy-rescue` subagent waits up to 590 seconds for
+  read-only jobs, with a ten-minute Bash timeout.
+- **A container job sees one commit.** Its copy has no history, remotes or
+  other refs, and nothing outside the repository. A review therefore gets its
+  diff from the host: in the prompt, or, over 400 KiB, as the file
+  `.agy-review.diff` in the copy. A task gets only its request text, so the
+  companion prints a `Note:` when the request names `origin/...`, `refs/...`,
+  `pr/<n>` or a path outside the repository.
+- **`Cannot review:` means no review.** When the diff or a file it needs is
+  missing, agy is told to return the verdict `cannot-review`, which the
+  result shows as `Cannot review: <what is missing>` with no verdict line.
 - **`Clearcut responded with HTTP code: 401`** lines in agy's logs are
   telemetry noise.
 - **Working copies.** A review's or plan's working copy is removed when the

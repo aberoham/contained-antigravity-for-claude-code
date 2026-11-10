@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
+from urllib.parse import unquote
 
 from . import failure
 from .state import now_iso, parse_iso
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+CANNOT_REVIEW = "cannot-review"
+# agy writes references as file:// links, bare or as a Markdown link's
+# target, with the line as a #L12 or #L12-L15 fragment.
+FILE_URL = r"file://(/[^\s)#>\]]*)(?:#L(\d+)(?:-L?\d+)?)?"
+FILE_LINKS = (re.compile(r"\[[^\]\n]*\]\(" + FILE_URL + r"\)"), re.compile(FILE_URL))
 
 
 def elapsed(job: dict[str, Any]) -> str:
@@ -126,6 +133,9 @@ def next_steps(job: dict[str, Any]) -> str:
 
 
 def _review_text(review: dict[str, Any]) -> str:
+    if review.get("verdict") == CANNOT_REVIEW:
+        # No verdict line at all, so a caller that reads only that line cannot take this for an approval.
+        return f"Cannot review: {str(review.get('summary', '')).strip()}\nNo verdict was given."
     lines = [f"Verdict: {review.get('verdict')}", "", str(review.get("summary", "")).strip(), ""]
     findings = sorted(review.get("findings") or [], key=lambda f: SEVERITY_ORDER.get(str(f.get("severity")), 9))
     if not findings:
@@ -156,7 +166,24 @@ def result_text(job: dict[str, Any], stored: dict[str, Any] | None) -> str:
     if worktree and root and not job.get("writable"):
         for variant in {worktree, os.path.realpath(worktree)}:
             text = text.replace(variant, root)
+        for pattern in FILE_LINKS:
+            text = pattern.sub(lambda match: _relative_reference(match, root), text)
+        head = (job.get("target") or {}).get("head")
+        if head:
+            # The user's checkout holds some other commit, so a path there is not the reviewed file.
+            text = text.replace(root.rstrip("/") + "/", "")
+            text += f"\nPaths and lines are as of {head}; read a file with `git show {head}:<path>`."
     return text
+
+
+def _relative_reference(match: re.Match[str], root: str) -> str:
+    """A file:// link into the repository as path:line, which Claude Code shows as a working link."""
+    path = unquote(match.group(1))
+    prefix = root.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return match.group(0)
+    line = match.group(2)
+    return path[len(prefix) :] + (f":{line}" if line else "")
 
 
 def _result_text(job: dict[str, Any], stored: dict[str, Any] | None) -> str:

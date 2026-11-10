@@ -1,7 +1,7 @@
 ---
 # Adapted from openai/codex-plugin-cc (Apache-2.0) and modified for agy. See NOTICE.
 description: Run an agy (Gemini) code review of local git changes, read-only
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch] [--model high|medium|low]'
+argument-hint: '[--wait|--background] [--base <ref>] [--head <ref>] [--scope auto|working-tree|branch] [--model high|medium|low]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(python3:*), Bash(git:*), AskUserQuestion
 ---
@@ -17,7 +17,8 @@ Core constraint:
 
 Execution mode:
 - If the arguments include `--wait`, run in the foreground. If they include `--background`, run in the background. Do not ask in either case.
-- Otherwise estimate the size first: `git status --short --untracked-files=all` and `git diff --shortstat` for working-tree changes, or `git diff --shortstat <base>...HEAD` for a branch.
+- Otherwise estimate the size first: `git status --short --untracked-files=all` and `git diff --shortstat` for working-tree changes, or `git diff --shortstat <base>...HEAD` for a branch (`<base>...<head>` with `--head`).
+- `--head <ref>` reviews a ref that is not checked out, such as a pull request fetched to `refs/remotes/pr/<n>`, against `--base`. The user's uncommitted changes are not part of that review.
 - Recommend waiting only for a tiny change (one or two files). Otherwise recommend background. Use `AskUserQuestion` once with `Wait for results` and `Run in background`, the recommended one first with `(Recommended)`.
 
 Foreground:

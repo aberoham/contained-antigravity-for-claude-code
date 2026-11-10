@@ -66,6 +66,14 @@ Do not invent files, lines, code paths, incidents, attack chains, or runtime beh
 If a conclusion depends on an inference, state that explicitly in the finding body and keep the confidence honest.
 </grounding_rules>
 
+<missing_material>
+If the diff is missing or empty, or you cannot open a file that the review
+depends on, do not review from descriptions, commit messages or guesses.
+Return verdict "cannot-review" with an empty findings array, and say in the
+summary exactly what is missing. Never return "approve" for a change you could
+not read in full.
+</missing_material>
+
 <calibration_rules>
 Prefer one strong finding over several weak ones.
 Do not dilute serious issues with filler.
