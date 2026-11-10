@@ -1,7 +1,7 @@
 ---
 # Adapted from openai/codex-plugin-cc (Apache-2.0) and modified for agy. See NOTICE.
 description: Hand a debugging, implementation or second-opinion task to agy (Gemini) through the agy-rescue subagent
-argument-hint: "[--background|--wait] [--resume|--fresh] [--read-only] [--model high|medium|low] [what agy should investigate or do]"
+argument-hint: "[--background|--wait] [--resume|--fresh] [--read-only] [--read-dir <directory>] [--model high|medium|low] [what agy should investigate, do or review]"
 allowed-tools: Bash(python3:*), AskUserQuestion, Agent
 ---
 
@@ -13,7 +13,8 @@ $ARGUMENTS
 Execution mode:
 - `--background` runs the subagent in the background; `--wait` or neither runs it in the foreground.
 - `--resume` means continue the last agy task in this repository; `--fresh` means start a new one. Without either, if the request is clearly a follow-up ("continue", "keep going", "apply the top fix"), add `--resume`; otherwise start fresh.
-- Keep `--model` and `--read-only` in the forwarded request.
+- Keep `--model`, `--read-only` and `--read-dir` in the forwarded request.
+- A request to review a branch, a ref or a fetched pull request is forwarded the same way; the subagent runs the companion's `review` command for it, with `--base` and `--head`.
 
 If no request was given, ask what agy should investigate or fix.
 

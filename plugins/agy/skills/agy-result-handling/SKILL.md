@@ -12,12 +12,14 @@ user-invocable: false
 agy has presented invented text as a verbatim copy of a real file, with wrong names and invented rules. Treat every specific claim as unverified until checked:
 
 - For each `file:line` reference and each quoted code or text, open the file in the user's repository (Read or Grep) and confirm the line exists and says what agy claims.
+- A review started with `--head <ref>` describes that ref, not the checkout. Its result ends with "Paths and lines are as of <ref>"; check its claims with `git show <ref>:<path>`, not with the working tree.
 - Check names agy gives for files, functions, settings, projects and commands.
 - In your reply, say which claims you checked and which you could not. Mark a claim that failed the check as wrong and show what the file actually says. Do not silently fix it.
 - For plans, check any step that tells the reader to copy something "exactly" or "verbatim" against the source.
 
 ## Presentation
 
+- A result with a `Cannot review:` line in place of a verdict is not a review. Report what was missing, give no verdict of your own in its place, and do not approve anything on the strength of it. The same holds when a task reply gives a verdict and also says it could not see the diff, a ref or a file.
 - Reviews: findings first, ordered by severity, with file paths and lines as verified. If there are no findings, say so.
 - Plans: give the plan, then the verification notes. Do not start implementing.
 - Tasks: say that agy changed files only in its working copy, list them, and point to `/agy:apply <job>`. Do not apply them yourself unless the user asks.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -49,7 +50,9 @@ HOST_SHELL_RULE = (
     "assistant, which may run them and send you the output in a later turn."
 )
 CONTAINER_SHELL_RULE = (
-    "You are inside a container that holds only this working copy, so run the commands you need, including tests."
+    "You are inside a container that holds only this working copy, so run the commands you need, including tests. "
+    "The copy is a single commit: it has no history, no remotes and no other branches or refs, and no path outside "
+    "the repository exists here."
 )
 HOST_REVIEW_GUIDANCE = (
     "Use the repository context below as primary evidence. Do not use shell commands in this "
@@ -58,7 +61,32 @@ HOST_REVIEW_GUIDANCE = (
 )
 CONTAINER_REVIEW_GUIDANCE = (
     "Use the repository context below as primary evidence, and inspect the working copy with "
-    "your file tools or read-only shell commands. Do not change files."
+    "your file tools or read-only shell commands. Do not change files. The working copy is a single "
+    "commit with no history, remotes or other refs, so git log and git diff show nothing useful there: the "
+    "change under review is the diff given below, and the files in the working copy are its result."
+)
+# What a task request may name that the job cannot reach. A container copy is
+# one commit with no refs; in either mode only the repository and any
+# --read-dir directory can be read.
+MISSING_REF = re.compile(r"(?<![\w/-])(?:origin/[\w.-][\w./-]*|refs/[\w.-][\w./-]*|pr/\d+)")
+ABSOLUTE_PATH = re.compile(r"(?<![\w.:/~-])/[\w.@+-]+(?:/[\w.@+-]+)+")
+# Material pasted into a request, which is the remedy and not the problem: a
+# fenced block, or the lines of a diff.
+FENCED = re.compile(r"^(```|~~~).*?(?:^\1|\Z)", re.S | re.M)
+HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+DIFF_HEADERS = (
+    "diff --git ",
+    "index ",
+    "--- ",
+    "+++ ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "rename from ",
+    "rename to ",
+    "Binary files ",
 )
 READ_ONLY_NOTE = (
     "\n\nThis round is read-only: the working copy is mounted read-only, so do not try to edit "
@@ -173,8 +201,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def start_job(
-    args: argparse.Namespace, kind: str, message: str, *, writable: bool, extra: dict[str, Any] | None = None
+    args: argparse.Namespace,
+    kind: str,
+    message: str,
+    *,
+    writable: bool,
+    extra: dict[str, Any] | None = None,
+    copy_files: dict[str, str] | None = None,
 ) -> int:
+    """Create the job's working copy and record, start its worker, and wait or report.
+
+    A review of another ref passes it as extra["target"]; the copy is then
+    built from that ref's commit. copy_files are written into the copy
+    after its baseline commit.
+    """
     binary = agybin.find_agy()
     if not binary:
         raise ClassifiedError("agy-missing", "agy is not installed or not on PATH. Run /agy:setup.")
@@ -206,14 +246,15 @@ def start_job(
         "read_dirs": [str(Path(d).expanduser().resolve()) for d in (args.read_dir or [])],
         "generation": 1,
     }
+    head_commit = ((extra or {}).get("target") or {}).get("head_commit")
     if isolation == "container":
         for directory in record["read_dirs"]:
             problem = container.overlaps_protected(Path(directory))
             if problem:
                 raise UsageError(f"--read-dir refused: {problem}.")
-        record["baseline"] = gitctx.create_copy(root, worktree)
+        record["baseline"] = gitctx.create_copy(root, worktree, head_commit)
     else:
-        record["baseline"] = gitctx.create_worktree(root, worktree, hook_command(job_dir))
+        record["baseline"] = gitctx.create_worktree(root, worktree, hook_command(job_dir), head_commit)
         try:
             git_admin = Path(gitctx.git(worktree, "rev-parse", "--absolute-git-dir").strip())
         except Exception:
@@ -222,6 +263,7 @@ def start_job(
         record["os_sandbox"] = sandbox.available() and not args.no_os_sandbox
         record["writable_paths"] = [str(worktree), str(agybin.agy_home()), str(job_dir), str(git_admin)]
     try:
+        gitctx.add_copy_files(worktree, copy_files or {})
         tree = gitctx.baseline_tree(worktree, record["baseline"])
     except Exception:
         gitctx.remove_worktree(root, worktree)
@@ -304,19 +346,66 @@ def wait_or_report(store: JobStore, job_id: str, args: argparse.Namespace) -> in
             return failure.exit_code(job.get("failure")) if job.get("status") == "failed" else 0
         time.sleep(2)
     job = store.read(job_id) or {}
-    print(f"agy job {job_id} is still running.\n{render.job_detail(job)}")
+    print(
+        f"agy job {job_id} is still running.\n{render.job_detail(job)}\n"
+        f"To wait for the result, run from {store.root}:\n{result_command(job_id)}"
+    )
     return 0
+
+
+def result_command(job_id: str) -> str:
+    """A shell command that waits for a job and prints its result, for a caller with no slash commands."""
+    return f"python3 {shlex.quote(str(Path(__file__).resolve()))} result {job_id} --wait-seconds 590"
+
+
+def _without_pasted_material(request: str) -> str:
+    """The request without fenced blocks and unfenced diffs.
+
+    Pasting a diff is the remedy for what unreachable_names reports, so the
+    refs and paths inside one are not reported. A hunk is as long as its
+    "@@" header says, so a deleted line that looks like a header stays inside
+    it, and a list item after it does not.
+    """
+    kept = []
+    old = new = 0  # lines of the current hunk still to come
+    for line in FENCED.sub("", request).splitlines():
+        if old > 0 or new > 0:
+            if line.startswith("-"):
+                old -= 1
+            elif line.startswith("+"):
+                new -= 1
+            elif not line.startswith("\\"):  # context, which a paste may have trimmed to an empty line
+                old, new = old - 1, new - 1
+            continue
+        header = HUNK_HEADER.match(line)
+        if header:
+            old, new = (int(count) if count is not None else 1 for count in header.groups())
+        elif not line.startswith(DIFF_HEADERS):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def unreachable_names(request: str, root: Path, read_dirs: list[str], in_container: bool) -> list[str]:
+    """Git refs and outside paths a task request names that its job cannot reach."""
+    prose = _without_pasted_material(request)
+    names = MISSING_REF.findall(prose) if in_container else []
+    allowed = [str(root), os.path.realpath(root), *read_dirs]
+    for path in ABSOLUTE_PATH.findall(prose):
+        real = os.path.realpath(path)
+        if not any(real == a or real.startswith(a.rstrip("/") + "/") for a in allowed):
+            names.append(path)
+    return list(dict.fromkeys(names))
 
 
 def cmd_review(args: argparse.Namespace, kind: str = "review") -> int:
     root = gitctx.repo_root(os.getcwd())
+    target = gitctx.resolve_target(root, args.base, args.scope, args.head)  # a bad ref is reported first
     in_container = choose_isolation(args) == "container"
-    target = gitctx.resolve_target(root, args.base, args.scope)
     context = gitctx.collect_context(root, target)
     if not context["files"]:
         print(f"Nothing to review: no changes found for {target['label']}.")
         return 0
-    focus = " ".join(getattr(args, "focus", []) or []).strip() or "(none)"
+    focus = review_instructions(args) or "(none)"
     name = "adversarial-review.md" if kind == "adversarial-review" else "review.md"
     message = template(
         name,
@@ -326,7 +415,23 @@ def cmd_review(args: argparse.Namespace, kind: str = "review") -> int:
         REVIEW_COLLECTION_GUIDANCE=CONTAINER_REVIEW_GUIDANCE if in_container else HOST_REVIEW_GUIDANCE,
         REVIEW_INPUT=context["content"],
     )
-    return start_job(args, kind, message, writable=False, extra={"target": target})
+    return start_job(args, kind, message, writable=False, extra={"target": target}, copy_files=context["copy_files"])
+
+
+def review_instructions(args: argparse.Namespace) -> str:
+    """What the caller asked the review to check: the instructions file, then the words after the flags.
+
+    The file is read here, on the host, so it may be anywhere the user can
+    read; the job itself sees only the repository.
+    """
+    parts = []
+    if args.instructions_file:
+        try:
+            parts.append(Path(args.instructions_file).expanduser().read_text(encoding="utf-8").strip())
+        except (OSError, UnicodeDecodeError) as exc:
+            raise UsageError(f"cannot read --instructions-file {args.instructions_file}: {exc}") from exc
+    parts.append(" ".join(args.focus or []).strip())
+    return "\n\n".join(p for p in parts if p)
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -360,6 +465,16 @@ def cmd_task(args: argparse.Namespace) -> int:
     )
     if args.read_only and in_container:
         message += READ_ONLY_NOTE
+    read_dirs = [str(Path(d).expanduser().resolve()) for d in (args.read_dir or [])]
+    missing = unreachable_names(request, store.root, read_dirs, in_container)
+    if missing:
+        # On stdout, because a subagent relays only stdout to its caller.
+        print(
+            f"Note: the request names {', '.join(missing)}, which the job cannot reach. "
+            + ("Its copy is one commit, with no other refs or history, and " if in_container else "It ")
+            + "reads only the repository and any --read-dir directory. Paste the diff or file into the request, "
+            "pass --read-dir, or review a ref with `review --base <ref> --head <ref>`.\n"
+        )
     return start_job(args, "task", message, writable=not args.read_only)
 
 
@@ -544,8 +659,17 @@ def cmd_result(args: argparse.Namespace) -> int:
     job = resolve_own_job(store, args, None if args.job else (lambda r: r.get("status") in TERMINAL_STATUSES))
     if not job:
         raise UsageError("No finished agy job from this session found.")
+    deadline = time.monotonic() + (args.wait_seconds or 0)
+    while job.get("status") in ACTIVE_STATUSES and time.monotonic() < deadline:
+        time.sleep(2)
+        job = store.read(job["id"]) or job
+    if job.get("status") in ACTIVE_STATUSES:
+        # A resumed job still holds its previous round's result, which must not be read as this round's.
+        print(f"agy job {job['id']} is still running.\n{render.job_detail(job)}")
+        return 0
     print(render.result_text(job, read_json(store.job_dir(job["id"]) / "result.json")))
-    return 0
+    waited_and_failed = args.wait_seconds and job.get("status") == "failed"
+    return failure.exit_code(job.get("failure")) if waited_and_failed else 0
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
@@ -724,9 +848,10 @@ def build_parser() -> argparse.ArgumentParser:
         review = sub.add_parser(name)
         add_run_options(review)
         review.add_argument("--base")
+        review.add_argument("--head", help="review this ref, not what is checked out, for example a fetched PR")
         review.add_argument("--scope", default="auto")
-        if name == "adversarial-review":
-            review.add_argument("focus", nargs="*")
+        review.add_argument("--instructions-file", help="a file of context and things to check, read on the host")
+        review.add_argument("focus", nargs="*", help="context and things to check")
         review.set_defaults(func=lambda a, kind=name: cmd_review(a, kind))
 
     plan = sub.add_parser("plan")
@@ -753,6 +878,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("job", nargs="?")
         if name == "status":
             p.add_argument("--all", action="store_true")
+        if name == "result":
+            p.add_argument("--wait-seconds", type=int, help="wait this long for a job that is still running")
         p.set_defaults(func=func)
 
     apply = sub.add_parser("apply")
