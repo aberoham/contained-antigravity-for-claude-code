@@ -3,7 +3,8 @@
 agy can stall on a model for minutes: its log shows "stream idle timeout
 (5m0s)" while it retries quietly. The worker treats that log line, or a long
 gap with no stream event, as a stall. It stops agy and resumes the same
-conversation on the next model down (FALLBACK in agybin).
+conversation on the same model. A stall is a service fault, not a sign that the
+model is wrong for the task, so the job never changes model on its own.
 """
 
 from __future__ import annotations
@@ -212,7 +213,7 @@ LOG_DRAIN_SECONDS = 10.0
 def _log_outcome(text: str) -> TurnOutcome | None:
     """How agy's log says the turn has ended, if it does."""
     if failure.SESSION_EXPIRED in text:
-        # Resuming on another model cannot help; only a new sign-in can.
+        # Resuming cannot help; only a new sign-in can.
         return TurnOutcome("signin", f"agy log: {failure.SESSION_EXPIRED}", None)
     match = agybin.STALL_LOG_PATTERN.search(text)
     if match:
@@ -441,17 +442,15 @@ class JobRunner:
                     usage_total[key] = usage_total.get(key, 0) + value
             conversation = self.job.get("conversation_id") or conversation
             if outcome.kind == "stall" and conversation and len(round_record["stalls"]) < max_resumes:
-                next_model = agybin.FALLBACK.get(model, model)
                 round_record["stalls"].append(
-                    {"at": now_iso(), "model": model, "reason": outcome.detail, "resumed_on": next_model}
+                    {"at": now_iso(), "model": model, "reason": outcome.detail, "resumed_on": model}
                 )
                 update = {
                     "status": "resuming",
-                    "phase": f"stalled on {model}; resuming on {next_model}",
+                    "phase": f"stalled on {model}; resuming on the same model",
                     "current_stalls": list(round_record["stalls"]),
                 }
                 self.store.update(self.job_id, lambda r, u=update: r.update(u))
-                model = next_model
                 message = CONTINUE_AFTER_STALL
                 continue
             break

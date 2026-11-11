@@ -146,12 +146,14 @@ def test_stall_retries_are_capped(companion):
         "2",
         "do it",
         scenario="stall",
-        FAKE_AGY_STALL_MODEL="gemini-4-argon-high,gemini-4-argon-medium,gemini-4-argon-low",
+        FAKE_AGY_STALL_RESUMES="1",
     )
     job = companion.job()
     assert job["status"] == "failed"
     assert len(job["rounds"][0]["stalls"]) == 2
     assert "no agy event" in proc.stdout
+    models = [call["argv"][call["argv"].index("--model") + 1] for call in companion.agy_calls()]
+    assert models == ["gemini-4-argon-high"] * 3
 
 
 def test_cancel_stops_worker_and_agy(companion, tmp_path):

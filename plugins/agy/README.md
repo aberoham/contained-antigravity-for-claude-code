@@ -211,13 +211,14 @@ treats that log line, or about five and a half minutes without a stream
 event, as a stall. While a tool step is running, the stream is silent until
 the tool finishes, so the runner then waits up to 30 minutes. On a stall it
 stops agy and everything agy started, and resumes the same conversation on
-the next model down (High to Medium, Medium to Low), up to two times.
-`/agy:status` shows each stall and the model that finished the job.
+the same model, up to two times. It never moves a job to a lower model: a stall
+is a fault in Google's service, and finishing on a weaker model returned weaker
+work. `/agy:status` shows each stall.
 
 An expired sign-in is not a stall. When the workforce pool's session ends,
 agy logs `"invalid_grant" "Refresh token has expired"` and retries without
 end; the runner stops the job at that line and reports a sign-in failure,
-instead of waiting for the stall timer and resuming on another model.
+instead of waiting for the stall timer and resuming.
 
 ## Failure classes and exit codes
 
@@ -237,7 +238,7 @@ yuting0624/antigravity-for-claude-code.
 | 13   | `agy-missing` | agy is not installed or not on PATH                       |
 | 14   | `model`       | agy did not recognise the model                           |
 | 15   | `licence`     | Google reclaimed the Gemini Enterprise seat               |
-| 16   | `stall`       | Still stalled after the resumes on lower models           |
+| 16   | `stall`       | Still stalled after two resumes on the same model         |
 | 17   | `container`   | Docker is not running, or the image is missing            |
 
 The class comes from agy's stderr, agy's own log and its error text, never

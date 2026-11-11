@@ -27,12 +27,6 @@ MODEL_ALIASES = {
     "low": "gemini-4-argon-low",
 }
 DEFAULT_MODEL = "gemini-4-argon-medium"
-# When a run stalls, resume on the next model down. Resuming a stalled
-# argon-high run on medium finished in about two minutes in testing.
-FALLBACK = {
-    "gemini-4-argon-high": "gemini-4-argon-medium",
-    "gemini-4-argon-medium": "gemini-4-argon-low",
-}
 
 STALL_LOG_PATTERN = re.compile(r"stream idle timeout")
 

@@ -134,6 +134,13 @@ on 24 October 2026 with agy 1.4.7, unless marked otherwise.
   in all. The review was real: three policy findings, one a genuine
   symlink-follow bypass (`ls -w1L` on BSD ls). So a result with an error
   and a response is parsed as a review anyway.
+- **Stalls no longer move a job to a lower model** (11 November 2026). Three
+  runs stalled on Google's side that day: one HTTP/2 `INTERNAL_ERROR` from
+  `businessaicode.eu.rep.googleapis.com` and two "stream idle timeout
+  (5m0s)". The runner then stepped them down from `gemini-4-argon-medium` to
+  `gemini-4-argon-low`, and one returned only a partial review (reported by
+  the session that ran them). A stall is a service fault, not a sign the
+  model is wrong for the task, so the runner now resumes on the same model.
 - In a Claude Code session that has another plugin's hooks active,
   `CLAUDE_PLUGIN_DATA` can be set in the Bash tool's environment to that
   plugin's data directory; the job state then lands there. Harmless, but
