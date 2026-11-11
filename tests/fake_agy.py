@@ -4,7 +4,9 @@
 It copies the agy 1.4.7 behaviour the plugin depends on: `-p` swallowing the
 next flag is an error, the prompt arrives on stdin as stream-json, output is
 stream-json events, tool calls go through the workspace PreToolUse hook, and a
-stalled model produces no events while its log records an idle timeout.
+stalled model produces no events while its log records an idle timeout. A
+stall scenario stalls only the first attempt; the companion's resume after a
+stall then gets a reply, unless FAKE_AGY_STALL_RESUMES is set.
 Every invocation's argv and stdin are appended to FAKE_AGY_CALLS.
 """
 
@@ -260,7 +262,9 @@ def main() -> int:
         return 0
 
     stall_models = os.environ.get("FAKE_AGY_STALL_MODEL", "gemini-4-argon-high").split(",")
-    if scenario.startswith("stall") and model in stall_models:
+    resuming_after_stall = message.startswith("Your previous attempt stopped because the model stream stalled")
+    stalls_now = not resuming_after_stall or os.environ.get("FAKE_AGY_STALL_RESUMES")
+    if scenario.startswith("stall") and model in stall_models and stalls_now:
         if scenario == "stall-usage":
             usage = {
                 "input_tokens": 40,

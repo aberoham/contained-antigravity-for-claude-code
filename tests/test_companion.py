@@ -95,14 +95,14 @@ def test_agy_permission_denials_are_queued(companion):
 
 
 @pytest.mark.parametrize("scenario", ["stall", "stall-log"])
-def test_stall_resumes_same_conversation_on_next_model(companion, scenario):
+def test_stall_resumes_same_conversation_on_same_model(companion, scenario):
     proc = companion.run("task", NO_SANDBOX, "--model", "high", "--stall-seconds", "3", "do it", scenario=scenario)
-    assert "reply from gemini-4-argon-medium" in proc.stdout
+    assert "reply from gemini-4-argon-high" in proc.stdout
     job = companion.job()
     assert job["status"] == "completed"
     (stall,) = job["rounds"][0]["stalls"]
     assert stall["model"] == "gemini-4-argon-high"
-    assert stall["resumed_on"] == "gemini-4-argon-medium"
+    assert stall["resumed_on"] == "gemini-4-argon-high"
     if scenario == "stall-log":
         assert "stream idle timeout" in stall["reason"]
     first, second = companion.agy_calls()
@@ -110,7 +110,8 @@ def test_stall_resumes_same_conversation_on_next_model(companion, scenario):
         first["argv"][first["argv"].index("--conversation") + 1] if "--conversation" in first["argv"] else None
     )
     assert conversation is None
-    assert second["argv"][second["argv"].index("--model") + 1] == "gemini-4-argon-medium"
+    assert second["argv"][second["argv"].index("--model") + 1] == "gemini-4-argon-high"
+    assert job["rounds"][0]["final_model"] == "gemini-4-argon-high"
     assert second["argv"][second["argv"].index("--conversation") + 1] == job["conversation_id"]
 
 
