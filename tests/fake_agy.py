@@ -290,6 +290,33 @@ def main() -> int:
                 log.write(
                     "Run: attempt 1 failed (request failed: stream idle timeout (5m0s): context deadline exceeded)\n"
                 )
+        if scenario == "stall-log-truncate" and log_file:
+            # The real agy starts its --log-file afresh on every run, so after a
+            # long first run the resumed run's log is shorter than before.
+            with open(log_file, "w") as log:
+                if not resuming_after_stall:
+                    log.write("I startup noise\n" * 400)
+                log.write(
+                    "Run: attempt 1 failed (request failed: stream idle timeout (5m0s): context deadline exceeded)\n"
+                )
+        if scenario == "stall-retry-events":
+            # While it retries a stalled model by itself, agy reports each
+            # failed attempt as an error_message step: events, but no progress.
+            index = 1
+            while True:
+                emit(
+                    {
+                        "event": "step_update",
+                        "step_update": {
+                            "conversation_id": conversation,
+                            "step_index": index,
+                            "state": "DONE",
+                            "step_type": "error_message",
+                        },
+                    }
+                )
+                index += 1
+                time.sleep(0.5)
         time.sleep(3600)
         return 0
 
