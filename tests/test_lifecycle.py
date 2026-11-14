@@ -156,6 +156,44 @@ def test_stall_retries_are_capped(companion):
     assert models == ["gemini-4-argon-high"] * 3
 
 
+def test_a_stall_in_a_restarted_shorter_log_is_still_seen(companion):
+    started = time.monotonic()
+    companion.run(
+        "task",
+        NO_SANDBOX,
+        "--model",
+        "high",
+        "--stall-seconds",
+        "600",
+        "do it",
+        scenario="stall-log-truncate",
+        FAKE_AGY_STALL_RESUMES="1",
+        check=False,
+    )
+    job = companion.job()
+    assert job["status"] == "failed"
+    assert len(job["rounds"][0]["stalls"]) == 2
+    assert time.monotonic() - started < 100  # only the log can tell; the event timer is 600 s
+
+
+def test_agy_retry_errors_do_not_hold_off_the_stall_timer(companion):
+    companion.run(
+        "task",
+        NO_SANDBOX,
+        "--model",
+        "high",
+        "--stall-seconds",
+        "2",
+        "do it",
+        scenario="stall-retry-events",
+        FAKE_AGY_STALL_RESUMES="1",
+        check=False,
+    )
+    job = companion.job()
+    assert job["status"] == "failed"
+    assert len(job["rounds"][0]["stalls"]) == 2
+
+
 def test_cancel_stops_worker_and_agy(companion, tmp_path):
     pid_file = tmp_path / "agy.pids"
     companion.run(

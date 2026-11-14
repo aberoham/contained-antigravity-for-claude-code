@@ -93,7 +93,11 @@ def run_turn(
 ) -> TurnOutcome:
     """Run one agy turn and follow it. on_stop runs after agy's process group
     is stopped, for whatever the process group does not cover (a container)."""
-    log_offset = log_path.stat().st_size if log_path.exists() else 0
+    # agy starts its --log-file afresh on every run, so an offset into the
+    # previous run's log would skip this run's lines. Keep that log aside and
+    # read this run's from the start.
+    _set_aside(log_path)
+    log_offset = 0
     with open(stderr_path, "ab") as stderr:
         proc = subprocess.Popen(
             command,
@@ -152,17 +156,21 @@ def _follow(
                 break
             now = time.monotonic()
             if line.strip():
-                last_event = now
                 events.write(line if line.endswith("\n") else line + "\n")
                 events.flush()
                 try:
                     event = json.loads(line)
                 except ValueError:
+                    last_event = now
                     continue
+                step = event.get("step_update") or {}
+                # agy reports each of its own failed retries of a stalled model
+                # as an error_message step; that is not progress.
+                if step.get("step_type") != "error_message":
+                    last_event = now
                 on_event(event)
                 if event.get("event") == "result":
                     result = event.get("result") or {}
-                step = event.get("step_update") or {}
                 if step.get("step_type") == "tool":
                     index = int(step.get("step_index") or 0)
                     if step.get("state") == "ACTIVE":
@@ -248,6 +256,16 @@ def _read_log_chunk(log_path: Path, offset: int) -> tuple[str, int]:
         return chunk, log.tell()
 
 
+def _set_aside(log_path: Path) -> None:
+    """Rename a previous run's log to agy.log.1, agy.log.2, ..."""
+    if _file_size(log_path) == 0:
+        return
+    n = 1
+    while log_path.with_name(f"{log_path.name}.{n}").exists():
+        n += 1
+    log_path.rename(log_path.with_name(f"{log_path.name}.{n}"))
+
+
 def _file_size(path: Path) -> int:
     try:
         return path.lstat().st_size
@@ -268,7 +286,6 @@ class JobRunner:
         self.denied_commands: list[str] = []
         self.step_usage: dict[str, int] = {}
         self.stderr_path = self.dir / "agy.stderr.txt"
-        self.log_start = 0
         self.stderr_start = 0
         self._last_write = 0.0
 
@@ -414,8 +431,8 @@ class JobRunner:
         usage_total: dict[str, int] = {}
         if self.job.get("isolation") == "container":
             container.seed_home(self.dir)  # a fresh home for this round, from the sign-in
-        # Both files are appended to across rounds; earlier rounds' errors are not this round's.
-        self.log_start = _file_size(self.log_path)
+        # stderr is appended to across rounds; earlier rounds' errors are not this round's.
+        # The log holds only the last run (see run_turn).
         self.stderr_start = _file_size(self.stderr_path)
 
         while True:
@@ -497,7 +514,7 @@ class JobRunner:
         elif result.get("status") != "SUCCESS":
             error = result.get("error") or f"agy finished with status {result.get('status')}"
         if error is not None:
-            log_text, _ = _read_log_chunk(self.log_path, self.log_start)
+            log_text, _ = _read_log_chunk(self.log_path, 0)
             failure_class = failure.classify(outcome.kind, stderr_tail, log_text, str(result.get("error") or ""))
             error = failure.ADVICE.get(failure_class, error)
 
